@@ -71,18 +71,26 @@ jobs:
             echo "KDIR=$PWD/kern" >> "$GITHUB_ENV"
           fi
 
-      - name: Run crate suite under vng/KVM (${{ matrix.tag }} -> abi ${{ matrix.abi }})
+      - name: Verify guest ABI, then run crate suite under vng/KVM (${{ matrix.tag }} -> abi ${{ matrix.abi }})
         run: |
           set -o pipefail
-          if [ "$KMODE" = "runner" ]; then
-            timeout 300 vng --run "$KIMG" -- "$TEST_BIN" --test-threads=1 2>&1 | tee vng.log | tail -140
-          else
-            ( cd "$KDIR" && timeout 300 vng -- "$TEST_BIN" --test-threads=1 ) 2>&1 | tee vng.log | tail -140
-          fi
+          run_in_vng() {  # runs "$@" inside the vng guest (hostfs, so host tools work)
+            if [ "$KMODE" = "runner" ]; then
+              timeout 300 vng --run "$KIMG" -- "$@"
+            else
+              ( cd "$KDIR" && timeout 300 vng -- "$@" )
+            fi
+          }
+          echo "== guest kernel + Landlock state (proves this is really abi ${{ matrix.abi }}) =="
+          run_in_vng sh -c 'echo "uname=$(uname -r)"; echo "lsm=$(cat /sys/kernel/security/lsm)"; python3 -c "import ctypes; print(\"GUEST_LANDLOCK_ABI=\" + str(ctypes.CDLL(None).syscall(444,0,0,1)))"' 2>&1 \
+            | grep -E 'uname=|lsm=|GUEST_LANDLOCK_ABI=' | tee guest.info
+          echo "== run the crate suite in the guest =="
+          run_in_vng "$TEST_BIN" --test-threads=1 2>&1 | tee vng.log | tail -140
           echo "===== VERDICT (target abi ${{ matrix.abi }}) ====="
-          grep -E 'abi_v8_all_threads|abi_v9_resolve_unix|test result:' vng.log | tail
-          if grep -qE 'test result: ok' vng.log; then
-            echo "PASS: crate suite GREEN under vng/KVM against ${{ matrix.tag }}"
-          else
-            echo "FAIL — inspect vng.log"; exit 1
+          GABI="$(sed -n 's/.*GUEST_LANDLOCK_ABI=\([0-9]*\).*/\1/p' guest.info | tail -1)"
+          echo "guest reported Landlock ABI: ${GABI:-unknown}"
+          grep -qE 'test result: ok' vng.log || { echo "FAIL: tests not ok"; exit 1; }
+          if [ "${{ matrix.tag }}" != "runner" ] && [ "${GABI:-0}" != "${{ matrix.abi }}" ]; then
+            echo "FAIL: expected guest ABI ${{ matrix.abi }} but got ${GABI:-unknown} (Landlock not active at target ABI)"; exit 1
           fi
+          echo "PASS: crate suite GREEN under vng/KVM against ${{ matrix.tag }}, guest Landlock ABI=${GABI}"
