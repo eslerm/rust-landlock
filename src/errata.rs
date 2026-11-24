@@ -56,20 +56,28 @@ impl Erratum {
     /// Queries the running kernel for fixed errata.
     ///
     /// Returns a bitmask of errata that have been fixed in the running
-    /// kernel.  Unknown errata bits from newer kernels are preserved.
-    /// Returns empty if the kernel doesn't support the errata interface.
+    /// kernel.  Errata unknown to this crate version, reported by newer
+    /// kernels, are ignored.  Returns empty if the kernel doesn't support the
+    /// errata interface.
     pub fn current() -> BitFlags<Self> {
         let ret = unsafe {
             uapi::landlock_create_ruleset(std::ptr::null(), 0, uapi::LANDLOCK_CREATE_RULESET_ERRATA)
         };
         if ret >= 0 {
-            // SAFETY: The kernel may return bits unknown to this crate version.
-            // Using from_bits_unchecked to preserve them.
-            unsafe { BitFlags::from_bits_unchecked(ret as u32) }
+            from_kernel_bits(ret as u32)
         } else {
             BitFlags::empty()
         }
     }
+}
+
+/// Converts the kernel's errata bitmask into known errata.
+///
+/// The kernel may report errata unknown to this crate version.  `BitFlags`
+/// requires every set bit to be a known variant, so the unknown ones are
+/// dropped.
+fn from_kernel_bits(raw: u32) -> BitFlags<Erratum> {
+    BitFlags::from_bits_truncate(raw)
 }
 
 /// Converts an [`ABI`] version into the set of errata applicable to that ABI.
@@ -204,6 +212,15 @@ fn not_backported_yet(version: (u32, u32, u32, &str)) -> BitFlags<Erratum> {
 fn errata_query() {
     // Verifies the syscall wrapper works on any kernel.
     let _errata = Erratum::current();
+}
+
+#[test]
+fn errata_unknown_bits_dropped() {
+    let known = BitFlags::<Erratum>::all();
+    let unknown = 1 << 31;
+    assert_eq!(from_kernel_bits(known.bits() | unknown), known);
+    assert!(from_kernel_bits(unknown).is_empty());
+    assert_eq!(from_kernel_bits(u32::MAX), known);
 }
 
 #[test]
